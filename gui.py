@@ -142,8 +142,9 @@ class SaveSyncApp:
         from pathlib import Path
         mapping_path = (self.config.mapping_path if self.config else Path("folder_mapping.json"))
         self.folder_map = FolderMap(mapping_path)
-        self.folder_map.data = {}
+        self.folder_map.ryujinx = {}
         self.folder_map.cached_citron_user = None
+        self.folder_map.cached_citron_base = None
         self.folder_map.save()
         self.citron_user_id = None
 
@@ -219,8 +220,9 @@ class SaveSyncApp:
             elif r:
                 st, ac = '🟥 Only in Ryujinx', '→'
             else:
-                st = '🟥 Only in Citron' if self.folder_map.get_title_id(tid) else '🚫 Run in Ryujinx'
-                ac = '←' if c else ''
+                # If we have a Ryujinx folder mapping for this TitleID, it's "Only in Citron" and syncable.
+                st = '🟥 Only in Citron' if self.folder_map.get_ryujinx_folder_id(tid) else '🚫 Run in Ryujinx'
+                ac = '←' if c and self.folder_map.get_ryujinx_folder_id(tid) else ''
             rows.append((name, tid, st, rd, cd, ac))
 
         # Sort & filter
@@ -281,34 +283,11 @@ class SaveSyncApp:
             self.engine.sync(r, SaveEntry(title_id, r.game_name, 'citron', self.citron_user_id, dest, r.modified_time, ''))
         elif action == '←' and c:
             print(f"DEBUG: syncing from Citron to Ryujinx for {title_id}")
-            fid = self.folder_map.get_folder_id(title_id)
+            fid = self.folder_map.get_ryujinx_folder_id(title_id)
             if fid:
                 dest = self.config.ryujinx_base / 'portable/bis/user/save' / fid / '0'
                 self.engine.sync(c, SaveEntry(title_id, c.game_name, 'ryujinx', fid, dest, c.modified_time, ''))
-        # Refresh
-        self.refresh_data()
-        # Determine row under cursor
-        row_id = self.tree.identify_row(event.y)
-        if not row_id:
-            return
-        self.tree.selection_set(row_id)
-        vals = self.tree.item(row_id, 'values')
-        title_id = vals[1]
-        r = self.all_saves[title_id].get('ryujinx')
-        c = self.all_saves[title_id].get('citron')
-        action = vals[5]
-        if action == '→' and r:
-            citron_base_used = getattr(self.folder_map, 'cached_citron_base', None)
-            if citron_base_used is None:
-                citron_base_used = self.config.citron_base / 'user/nand/user/save/0000000000000000'
-            dest = citron_base_used / self.citron_user_id / title_id
-            self.engine.sync(r, SaveEntry(title_id, r.game_name, 'citron', self.citron_user_id, dest, r.modified_time, ''))
-        elif action == '←' and c:
-            fid = self.folder_map.get_folder_id(title_id)
-            if fid:
-                dest = self.config.ryujinx_base / 'portable/bis/user/save' / fid / '0'
-                self.engine.sync(c, SaveEntry(title_id, c.game_name, 'ryujinx', fid, dest, c.modified_time, ''))
-        # Refresh
+        # Refresh once after performing the selected sync
         self.refresh_data()
 
     def sync_all(self):
@@ -327,7 +306,7 @@ class SaveSyncApp:
                 dest = citron_base_used / self.citron_user_id / tid
                 self.engine.sync(r, SaveEntry(tid, r.game_name, 'citron', self.citron_user_id, dest, r.modified_time, ''))
             elif c:
-                fid = self.folder_map.get_folder_id(title_id)
+                fid = self.folder_map.get_ryujinx_folder_id(tid)
                 if fid:
                     dest = self.config.ryujinx_base / 'portable/bis/user/save' / fid / '0'
                     self.engine.sync(c, SaveEntry(tid, c.game_name, 'ryujinx', fid, dest, c.modified_time, ''))
@@ -350,6 +329,46 @@ class SaveSyncApp:
         self.root.wait_window(dlg)
         return var.get()
 
+    def prompt_map_ryujinx_folder(self, folder_id: str):
+        """Modal to manually map a Ryujinx folder ID to a TitleID.
+        Accepts a 16-hex TitleID or a NSWDB-known title; saves mapping on OK.
+        """
+        dlg = tk.Toplevel(self.root)
+        dlg.title(f"Map folder {folder_id}")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        ttk.Label(dlg, text=f"Folder ID: {folder_id}").pack(pady=(10,4))
+        ttk.Label(dlg, text="Enter TitleID (16 hex chars) or leave blank to search by name:").pack()
+        entry_var = tk.StringVar()
+        entry = ttk.Entry(dlg, textvariable=entry_var, width=40)
+        entry.pack(padx=10, pady=6)
+
+        result_var = tk.StringVar(value="")
+        msg = ttk.Label(dlg, textvariable=result_var, foreground='red')
+        msg.pack()
+
+        def on_ok():
+            val = entry_var.get().strip()
+            if not val:
+                result_var.set("Please enter a TitleID or cancel.")
+                return
+            val = val.upper()
+            # basic format check
+            import re
+            if not re.match(r'^[0-9A-F]{16}$', val):
+                result_var.set("TitleID must be 16 hex characters.")
+                return
+            # register mapping (allow even if not present in NSWDB)
+            self.folder_map.register_ryujinx_folder(folder_id, val)
+            dlg.destroy()
+            self.refresh_data()
+
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.pack(pady=10)
+        ttk.Button(btn_frame, text="OK", command=on_ok).pack(side='left', padx=6)
+        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side='right', padx=6)
+        entry.focus_set()
+        self.root.wait_window(dlg)
     def show_context_menu(self, event):
         iid = self.tree.identify_row(event.y)
         if not iid:
@@ -362,18 +381,22 @@ class SaveSyncApp:
         menu = tk.Menu(self.root, tearoff=0)
         if r:
             menu.add_command(label="Open Ryujinx Save Folder", command=lambda: self.open_path(r.path))
+            # Offer manual mapping if Ryujinx folder is not registered
+            if r.folder_id and not self.folder_map.get_ryujinx_title_id(r.folder_id):
+                menu.add_command(label="Map Ryujinx folder...", command=lambda: self.prompt_map_ryujinx_folder(r.folder_id))
         if c:
             menu.add_command(label="Open Citron Save Folder", command=lambda: self.open_path(c.path))
         menu.add_command(label="Open Backup Folder", command=lambda: self.open_path(self.config.backup_dir))
         menu.post(event.x_root, event.y_root)
 
     def open_path(self, path):
+        p = str(path)
         if platform.system() == "Windows":
-            os.startfile(path)
+            os.startfile(p)
         elif platform.system() == "Darwin":
-            subprocess.call(["open", path])
+            subprocess.call(["open", p])
         else:
-            subprocess.call(["xdg-open", path])
+            subprocess.call(["xdg-open", p])
 
     def on_exit(self):
         self.save_last_config()

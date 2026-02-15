@@ -2,9 +2,7 @@
 # Edit at https://www.toptal.com/developers/gitignore?templates=python
 
 ### Manual Exclusions ###
-US.en.json
-folder_mapping.json
-.gui_config.json
+*.json
 backupHistory/*
 !backupHistory/.gitkeep
 *.7z

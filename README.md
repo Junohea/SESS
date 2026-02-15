@@ -66,7 +66,7 @@ A cross-emulator save synchronizer for Nintendo Switch save data, currently atte
 - Delete .gui_config.json or folder_mapping.json to reset.
 
 ### Game names are wrong or missing
-- Delete `US.en.json` and let the application redownload the latest version
+- Delete the `.json` files and let the application redownload the latest versions
 
 ### Sync fails silently:
 - Open a console alongside the GUI to see DEBUG or error prints.

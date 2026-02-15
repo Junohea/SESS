@@ -16,7 +16,10 @@ class SaveScanner:
 
     def scan_ryujinx(self) -> List[SaveEntry]:
         save_entries = []
-        save_root = self.config.ryujinx_base / "portable/bis/user/save"
+        save_root = self._resolve_ryujinx_save_root()
+
+        if not save_root or not save_root.exists():
+            return []
 
         for folder in save_root.iterdir():
             if not folder.is_dir():
@@ -34,10 +37,14 @@ class SaveScanner:
                 if not title_id:
                     continue
 
-                # Register mapping of folder to title_id
-                self.folder_map.register_folder(folder.name, title_id)
-
-                game_info = self.nswdb.get_game_info(title_id) or GameInfo(title_id=title_id, name="Unknown")
+                # Validate TitleID against NSWDB before creating a persistent mapping
+                game_info = self.nswdb.get_game_info(title_id)
+                if game_info:
+                    # Register mapping of Ryujinx folder -> TitleID
+                    self.folder_map.register_ryujinx_folder(folder.name, title_id)
+                else:
+                    # Don't persist unknown/invalid title IDs — still include the save entry but mark unknown
+                    game_info = GameInfo(title_id=title_id, name="Unknown (unverified)")
                 file_hash = self._hash_directory(save_dir)
                 last_modified = self._latest_mod_time(save_dir)
 
@@ -52,6 +59,30 @@ class SaveScanner:
                 ))
 
         return save_entries
+
+    def _resolve_ryujinx_save_root(self):
+        """Detect the most likely Ryujinx save root under the configured base."""
+        base = self.config.ryujinx_base
+        candidates = [
+            base / "portable/bis/user/save",
+            base / "user/save",
+            base / "save",
+            base / "portable/user/save",
+            base,
+        ]
+        for cand in candidates:
+            if cand.exists() and cand.is_dir():
+                return cand
+        # As a fallback, try to find a folder containing ExtraData0 somewhere under base
+        try:
+            for p in base.rglob("ExtraData0"):
+                # ExtraData0 is inside <folder>/ExtraData0, so parent.parent should be save root structure
+                possible = p.parents[1]
+                if possible.exists():
+                    return possible
+        except Exception:
+            pass
+        return None
 
     def scan_citron(self) -> List[SaveEntry]:
         save_entries = []
@@ -94,8 +125,8 @@ class SaveScanner:
                 continue
 
             title_id = folder.name.upper()
-            # Use a composite key for citron mapping
-            self.folder_map.register_folder(f"citron::{user_id}::{title_id}", title_id)
+            # Citron mappings are not persisted (they are derived from the filesystem/user id)
+            # No persistent registration here - leave Ryujinx mappings separate.
 
             game_info = self.nswdb.get_game_info(title_id) or GameInfo(title_id=title_id, name="Unknown")
             file_hash = self._hash_directory(folder)
@@ -118,18 +149,40 @@ class SaveScanner:
             data = path.read_bytes()
             if len(data) >= 8:
                 raw = data[0:8]
-                title_id = ''.join(f"{b:02X}" for b in reversed(raw))
-                return title_id.upper()
+                title_id = ''.join(f"{b:02X}" for b in reversed(raw)).upper()
+                # Validate format (16 hex characters)
+                import re
+                if re.match(r'^[0-9A-F]{16}$', title_id):
+                    return title_id
         except Exception:
             pass
         return None
 
     def _hash_directory(self, directory: Path) -> str:
+        """Hash directory contents deterministically.
+        - include relative path to avoid collisions from identical filenames in different subfolders
+        - stream file contents to avoid large memory spikes
+        """
         md5 = hashlib.md5()
         for file in sorted(directory.rglob("*")):
-            if file.is_file():
-                md5.update(file.name.encode())
-                md5.update(file.read_bytes())
+            if not file.is_file():
+                continue
+            rel = file.relative_to(directory).as_posix().encode('utf-8')
+            md5.update(rel)
+            # stream file contents
+            try:
+                with file.open('rb') as fh:
+                    while True:
+                        chunk = fh.read(8192)
+                        if not chunk:
+                            break
+                        md5.update(chunk)
+            except Exception:
+                # if a file can't be read, include its name + size as a fallback
+                try:
+                    md5.update(f"UNREADABLE:{file.name}:{file.stat().st_size}".encode())
+                except Exception:
+                    md5.update(file.name.encode())
         return md5.hexdigest()
 
     def _latest_mod_time(self, directory: Path) -> datetime:

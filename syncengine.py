@@ -25,6 +25,11 @@ class SyncEngine:
         self._copy_save(source.path, destination.path)
 
     def _backup(self, save: SaveEntry):
+        # Don't attempt to back up a destination that doesn't yet exist
+        if not save.path.exists() or not any(f.is_file() for f in save.path.rglob("*")):
+            print(f"  ℹ️ No existing destination to back up at {save.path}; skipping backup.")
+            return
+
         safe_name = sanitize_filename(save.game_name)
         title_folder = self.backup_dir / f"{save.title_id}-{safe_name}"
         title_folder.mkdir(exist_ok=True, parents=True)
@@ -45,8 +50,59 @@ class SyncEngine:
         for old_zip in zips[max_versions:]:
             old_zip.unlink()
 
+    def _is_safe_destination(self, dst: Path) -> bool:
+        try:
+            resolved = dst.resolve()
+        except Exception:
+            return False
+        # Refuse obvious unsafe targets
+        if str(resolved) in ('/', str(Path.home())):
+            return False
+        # Ensure destination is inside one of the known emulator bases
+        bases = [self.config.ryujinx_base.resolve(), self.config.citron_base.resolve()]
+        for base in bases:
+            try:
+                if resolved.is_relative_to(base):
+                    return True
+            except Exception:
+                continue
+        return False
+
     def _copy_save(self, src: Path, dst: Path):
+        # Basic validation
+        if not src.exists() or not src.is_dir():
+            raise FileNotFoundError(f"Source save folder does not exist: {src}")
+        if not self._is_safe_destination(dst):
+            raise RuntimeError(f"Refusing to write outside known emulator roots: {dst}")
+
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        tmp = dst.parent / f".sync_tmp_{dst.name}_{timestamp}"
+        old = dst.parent / f".sync_old_{dst.name}_{timestamp}"
+
+        # Ensure clean temp
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        # Copy to temporary location first
+        shutil.copytree(src, tmp)
+
+        # Move existing dst aside (if present)
         if dst.exists():
-            shutil.rmtree(dst)
-        shutil.copytree(src, dst)
+            try:
+                dst.rename(old)
+            except Exception:
+                shutil.move(str(dst), str(old))
+
+        # Promote tmp -> dst
+        try:
+            tmp.rename(dst)
+        except Exception:
+            shutil.move(str(tmp), str(dst))
+
+        # Cleanup old backup-of-destination
+        if old.exists():
+            try:
+                shutil.rmtree(old)
+            except Exception:
+                print(f"  ⚠️ Warning: failed to remove old destination {old}")
+
         print(f"  ✔ Save copied to {dst}")

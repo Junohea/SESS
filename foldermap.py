@@ -9,35 +9,61 @@ prompt_for_choice_gui: Optional[Callable[[list[str]], Optional[str]]] = None
 class FolderMap:
     def __init__(self, path: Path):
         self.path = path
-        self.data: Dict[str, str] = {}
-        self.cached_citron_user: Optional[str] = None  # NEW
+        # Internal maps (new schema stores a 'ryujinx' dict)
+        self.ryujinx: Dict[str, str] = {}
+        self.cached_citron_user: Optional[str] = None
         self.cached_citron_base: Optional[Path] = None
         self.load()
         
     def load(self):
+        # Support both legacy flat maps and the new namespaced schema
         if self.path.exists():
             try:
                 with open(self.path, 'r', encoding='utf-8') as f:
-                    self.data = json.load(f)
+                    raw = json.load(f)
+
+                # 1) New namespaced schema: { "ryujinx": { ... } }
+                if isinstance(raw, dict) and 'ryujinx' in raw and isinstance(raw['ryujinx'], dict):
+                    self.ryujinx = {k: v.upper() for k, v in raw['ryujinx'].items()}
+
+                # 2) Legacy flat schema: { "<folder_id>": "<title_id>", ... }
+                elif isinstance(raw, dict) and raw and all(isinstance(v, str) for v in raw.values()):
+                    self.ryujinx = {k: v.upper() for k, v in raw.items()}
+
+                else:
+                    self.ryujinx = {}
             except Exception:
-                self.data = {}
+                self.ryujinx = {}
 
     def save(self):
+        # Persist only the ryujinx mapping under a namespaced key for clarity
+        to_write = {'ryujinx': self.ryujinx}
         with open(self.path, 'w', encoding='utf-8') as f:
-            json.dump(self.data, f, indent=2)
+            json.dump(to_write, f, indent=2)
 
-    def get_title_id(self, folder_id: str) -> Optional[str]:
-        return self.data.get(folder_id)
+    # --- Ryujinx-specific mapping API (explicit, unambiguous) ---
+    def get_ryujinx_title_id(self, folder_id: str) -> Optional[str]:
+        return self.ryujinx.get(folder_id)
 
-    def get_folder_id(self, title_id: str) -> Optional[str]:
-        for fid, tid in self.data.items():
+    def get_ryujinx_folder_id(self, title_id: str) -> Optional[str]:
+        for fid, tid in self.ryujinx.items():
             if tid.upper() == title_id.upper():
                 return fid
         return None
 
-    def register_folder(self, folder_id: str, title_id: str):
-        self.data[folder_id] = title_id.upper()
+    def register_ryujinx_folder(self, folder_id: str, title_id: str):
+        self.ryujinx[folder_id] = title_id.upper()
         self.save()
+
+    # Backwards-compatible aliases that operate only on Ryujinx mappings
+    def get_title_id(self, folder_id: str) -> Optional[str]:
+        return self.get_ryujinx_title_id(folder_id)
+
+    def get_folder_id(self, title_id: str) -> Optional[str]:
+        return self.get_ryujinx_folder_id(title_id)
+
+    def register_folder(self, folder_id: str, title_id: str):
+        return self.register_ryujinx_folder(folder_id, title_id)
 
     def resolve_citron_user(self, citron_base: Path, known_title_ids: set) -> Optional[str]:
         if self.cached_citron_user:
