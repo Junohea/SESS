@@ -25,9 +25,15 @@ class SyncEngine:
         self._copy_save(source.path, destination.path)
 
     def _backup(self, save: SaveEntry):
-        # Don't attempt to back up a destination that doesn't yet exist
-        if not save.path.exists() or not any(f.is_file() for f in save.path.rglob("*")):
+        # Don't attempt to back up a destination that doesn't yet exist or is empty
+        if not save.path.exists():
             print(f"  ℹ️ No existing destination to back up at {save.path}; skipping backup.")
+            return
+
+        # Collect files once to avoid a race where the directory changes between checks
+        files = [f for f in save.path.rglob("*") if f.is_file()]
+        if not files:
+            print(f"  ℹ️ No files found to back up in {save.path}; skipping backup.")
             return
 
         safe_name = sanitize_filename(save.game_name)
@@ -38,11 +44,11 @@ class SyncEngine:
         zip_path = title_folder / f"saveBackup_{timestamp}.zip"
 
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for file in save.path.rglob("*"):
-                if file.is_file():
-                    arcname = file.relative_to(save.path)
-                    zipf.write(file, arcname)
+            for file in files:
+                arcname = file.relative_to(save.path)
+                zipf.write(file, arcname)
 
+        print(f"  ✔ Backed up {len(files)} file(s) to {zip_path}")
         self._enforce_backup_limit(title_folder, self.config.max_backups)
 
     def _enforce_backup_limit(self, folder: Path, max_versions: int):

@@ -44,7 +44,7 @@ class SaveScanner:
                     self.folder_map.register_ryujinx_folder(folder.name, title_id)
                 else:
                     # Don't persist unknown/invalid title IDs — still include the save entry but mark unknown
-                    game_info = GameInfo(title_id=title_id, name="Unknown (unverified)")
+                    game_info = GameInfo(title_id=title_id, name="_Unknown (Not found in titleID json files)")
                 file_hash = self._hash_directory(save_dir)
                 last_modified = self._latest_mod_time(save_dir)
 
