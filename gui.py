@@ -121,14 +121,31 @@ class SaveSyncApp:
     def browse_ryujinx(self):
         path = filedialog.askdirectory()
         if path:
+            old = self.ryujinx_base.get()
             self.ryujinx_base.set(path)
+            if path != old:
+                self.redo_folder_mappings()
             self.refresh_data()
 
     def browse_citron(self):
         path = filedialog.askdirectory()
         if path:
+            old = self.citron_base.get()
             self.citron_base.set(path)
+            if path != old:
+                self.redo_folder_mappings()
             self.refresh_data()
+
+    def redo_folder_mappings(self):
+        # Recreate the FolderMap and clear any cached mappings so
+        # subsequent scans will re-register folders for the new bases.
+        from pathlib import Path
+        mapping_path = (self.config.mapping_path if self.config else Path("folder_mapping.json"))
+        self.folder_map = FolderMap(mapping_path)
+        self.folder_map.data = {}
+        self.folder_map.cached_citron_user = None
+        self.folder_map.save()
+        self.citron_user_id = None
 
     def on_sort_by(self, col):
         if self.sort_column == col:
@@ -257,7 +274,10 @@ class SaveSyncApp:
         print(f"DEBUG: action: {action}, r: {bool(r)}, c: {bool(c)}")
         if action == '→' and r:
             print(f"DEBUG: syncing from Ryujinx to Citron for {title_id}")
-            dest = self.config.citron_base / 'user/nand/user/save/0000000000000000' / self.citron_user_id / title_id
+            citron_base_used = getattr(self.folder_map, 'cached_citron_base', None)
+            if citron_base_used is None:
+                citron_base_used = self.config.citron_base / 'user/nand/user/save/0000000000000000'
+            dest = citron_base_used / self.citron_user_id / title_id
             self.engine.sync(r, SaveEntry(title_id, r.game_name, 'citron', self.citron_user_id, dest, r.modified_time, ''))
         elif action == '←' and c:
             print(f"DEBUG: syncing from Citron to Ryujinx for {title_id}")
@@ -278,7 +298,10 @@ class SaveSyncApp:
         c = self.all_saves[title_id].get('citron')
         action = vals[5]
         if action == '→' and r:
-            dest = self.config.citron_base / 'user/nand/user/save/0000000000000000' / self.citron_user_id / title_id
+            citron_base_used = getattr(self.folder_map, 'cached_citron_base', None)
+            if citron_base_used is None:
+                citron_base_used = self.config.citron_base / 'user/nand/user/save/0000000000000000'
+            dest = citron_base_used / self.citron_user_id / title_id
             self.engine.sync(r, SaveEntry(title_id, r.game_name, 'citron', self.citron_user_id, dest, r.modified_time, ''))
         elif action == '←' and c:
             fid = self.folder_map.get_folder_id(title_id)
@@ -298,7 +321,10 @@ class SaveSyncApp:
                 else:
                     self.engine.sync(c, r)
             elif r:
-                dest = self.config.citron_base / 'user/nand/user/save/0000000000000000' / self.citron_user_id / tid
+                citron_base_used = getattr(self.folder_map, 'cached_citron_base', None)
+                if citron_base_used is None:
+                    citron_base_used = self.config.citron_base / 'user/nand/user/save/0000000000000000'
+                dest = citron_base_used / self.citron_user_id / tid
                 self.engine.sync(r, SaveEntry(tid, r.game_name, 'citron', self.citron_user_id, dest, r.modified_time, ''))
             elif c:
                 fid = self.folder_map.get_folder_id(title_id)

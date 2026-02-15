@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from typing import Dict, Optional
 from typing import Callable
@@ -10,6 +11,7 @@ class FolderMap:
         self.path = path
         self.data: Dict[str, str] = {}
         self.cached_citron_user: Optional[str] = None  # NEW
+        self.cached_citron_base: Optional[Path] = None
         self.load()
         
     def load(self):
@@ -41,7 +43,58 @@ class FolderMap:
         if self.cached_citron_user:
             return self.cached_citron_user
 
-        base = citron_base / "user/nand/user/save/0000000000000000"
+        # Check for Citron's custom global save path in qt-config.ini
+        config_file = citron_base / "user/config/qt-config.ini"
+        base = None
+        try:
+            if config_file.exists():
+                for line in config_file.read_text(encoding='utf-8', errors='ignore').splitlines():
+                    if 'global_custom_save_path' in line:
+                        parts = line.split('=', 1)
+                        if len(parts) == 2:
+                            val = parts[1].strip().strip('"').strip("'")
+                            # Ignore explicit false/disabled values
+                            if not val or val.lower() in ('false', '0', 'none'):
+                                continue
+                            # Expand environment vars and user home
+                            expanded = os.path.expandvars(val)
+                            p = Path(expanded).expanduser()
+                            if p.exists() and p.is_dir():
+                                # Try common subpaths where citron may place the actual save 0000 folder
+                                candidates = [
+                                    p / "user/nand/user/save/0000000000000000",
+                                    p / "user/save/0000000000000000",
+                                    p / "user/nand/user/save",
+                                    p / "user/save",
+                                    p,
+                                ]
+                                for cand in candidates:
+                                    if cand.exists() and cand.is_dir():
+                                        # If cand points to the 0000 folder, use it directly
+                                        # If cand is higher-level like 'user/save', append '0000000000000000'
+                                        if cand.name == "0000000000000000":
+                                            base = cand
+                                        else:
+                                            possible = cand / "0000000000000000"
+                                            if possible.exists() and possible.is_dir():
+                                                base = possible
+                                            else:
+                                                # If cand already contains user-id folders, use it
+                                                base = cand
+                                        break
+                                if base:
+                                    break
+        except Exception:
+            base = None
+
+        if base is None:
+            base = citron_base / "user/nand/user/save/0000000000000000"
+
+        # Cache the discovered base for use by callers
+        try:
+            self.cached_citron_base = base
+        except Exception:
+            self.cached_citron_base = None
         candidates = []
 
         for folder in base.iterdir():

@@ -60,7 +60,30 @@ class SaveScanner:
         if not user_id:
             return []
 
-        save_root = self.config.citron_base / "user/nand/user/save/0000000000000000" / user_id
+        # Determine actual save_root. Prefer any cached base discovered by FolderMap
+        cached_base = getattr(self.folder_map, 'cached_citron_base', None)
+        save_root = None
+        if cached_base:
+            # If cached_base already points to the 0000 folder
+            if cached_base.name == "0000000000000000":
+                save_root = cached_base / user_id
+            else:
+                # Try some likely subpaths under the cached base
+                candidates = [
+                    cached_base / "user/nand/user/save/0000000000000000" / user_id,
+                    cached_base / "user/save/0000000000000000" / user_id,
+                    cached_base / "user/nand/user/save" / user_id,
+                    cached_base / "user/save" / user_id,
+                    cached_base / user_id,
+                ]
+                for cand in candidates:
+                    if cand.exists() and cand.is_dir():
+                        save_root = cand
+                        break
+
+        if not save_root:
+            # Fallback to configured citron base
+            save_root = self.config.citron_base / "user/nand/user/save/0000000000000000" / user_id
 
         for folder in save_root.iterdir():
             if not folder.is_dir():
