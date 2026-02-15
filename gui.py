@@ -329,46 +329,7 @@ class SaveSyncApp:
         self.root.wait_window(dlg)
         return var.get()
 
-    def prompt_map_ryujinx_folder(self, folder_id: str):
-        """Modal to manually map a Ryujinx folder ID to a TitleID.
-        Accepts a 16-hex TitleID or a NSWDB-known title; saves mapping on OK.
-        """
-        dlg = tk.Toplevel(self.root)
-        dlg.title(f"Map folder {folder_id}")
-        dlg.transient(self.root)
-        dlg.grab_set()
-        ttk.Label(dlg, text=f"Folder ID: {folder_id}").pack(pady=(10,4))
-        ttk.Label(dlg, text="Enter TitleID (16 hex chars) or leave blank to search by name:").pack()
-        entry_var = tk.StringVar()
-        entry = ttk.Entry(dlg, textvariable=entry_var, width=40)
-        entry.pack(padx=10, pady=6)
 
-        result_var = tk.StringVar(value="")
-        msg = ttk.Label(dlg, textvariable=result_var, foreground='red')
-        msg.pack()
-
-        def on_ok():
-            val = entry_var.get().strip()
-            if not val:
-                result_var.set("Please enter a TitleID or cancel.")
-                return
-            val = val.upper()
-            # basic format check
-            import re
-            if not re.match(r'^[0-9A-F]{16}$', val):
-                result_var.set("TitleID must be 16 hex characters.")
-                return
-            # register mapping (allow even if not present in NSWDB)
-            self.folder_map.register_ryujinx_folder(folder_id, val)
-            dlg.destroy()
-            self.refresh_data()
-
-        btn_frame = ttk.Frame(dlg)
-        btn_frame.pack(pady=10)
-        ttk.Button(btn_frame, text="OK", command=on_ok).pack(side='left', padx=6)
-        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side='right', padx=6)
-        entry.focus_set()
-        self.root.wait_window(dlg)
     def show_context_menu(self, event):
         iid = self.tree.identify_row(event.y)
         if not iid:
@@ -381,9 +342,6 @@ class SaveSyncApp:
         menu = tk.Menu(self.root, tearoff=0)
         if r:
             menu.add_command(label="Open Ryujinx Save Folder", command=lambda: self.open_path(r.path))
-            # Offer manual mapping if Ryujinx folder is not registered
-            if r.folder_id and not self.folder_map.get_ryujinx_title_id(r.folder_id):
-                menu.add_command(label="Map Ryujinx folder...", command=lambda: self.prompt_map_ryujinx_folder(r.folder_id))
         if c:
             menu.add_command(label="Open Citron Save Folder", command=lambda: self.open_path(c.path))
         menu.add_command(label="Open Backup Folder", command=lambda: self.open_path(self.config.backup_dir))
