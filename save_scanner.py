@@ -26,37 +26,58 @@ class SaveScanner:
                 continue
 
             extra_data = folder / "ExtraData0"
-            save_dir = folder / "0"
 
-            if extra_data.exists() and save_dir.exists():
-                # Skip empty save directories
-                if not any(f.is_file() for f in save_dir.rglob("*")):
-                    continue
+            # If ExtraData0 exists we can determine the TitleID — register a folder mapping
+            # for known titleIDs even if the numeric slot folders are currently empty.
+            if not extra_data.exists():
+                continue
 
-                title_id = self._parse_title_id(extra_data)
-                if not title_id:
-                    continue
+            title_id = self._parse_title_id(extra_data)
+            if not title_id:
+                continue
 
-                # Validate TitleID against NSWDB before creating a persistent mapping
-                game_info = self.nswdb.get_game_info(title_id)
-                if game_info:
-                    # Register mapping of Ryujinx folder -> TitleID
-                    self.folder_map.register_ryujinx_folder(folder.name, title_id)
-                else:
-                    # Don't persist unknown/invalid title IDs — still include the save entry but mark unknown
-                    game_info = GameInfo(title_id=title_id, name="_Unknown (Not found in titleID json files)")
-                file_hash = self._hash_directory(save_dir)
-                last_modified = self._latest_mod_time(save_dir)
+            # Validate TitleID against NSWDB and persist the mapping for *known* titles.
+            # (Do not persist unknown/invalid titleIDs — keep prior behavior.)
+            game_info = self.nswdb.get_game_info(title_id)
+            if game_info:
+                self.folder_map.register_ryujinx_folder(folder.name, title_id)
 
-                save_entries.append(SaveEntry(
-                    title_id=title_id,
-                    game_name=game_info.name,
-                    source="ryujinx",
-                    folder_id=folder.name,
-                    path=save_dir,
-                    modified_time=last_modified,
-                    hash=file_hash
-                ))
+            # Ryujinx may store per-user slots under numeric names (commonly '0' and '1').
+            # Prefer slot '0' but accept '1' (or the most-recent non-empty slot) if '0' is missing/empty.
+            candidate_slots = [folder / "0", folder / "1"]
+            existing_slots = [s for s in candidate_slots if s.exists() and s.is_dir()]
+
+            # If there are no existing slot directories or all are empty, do not create a SaveEntry
+            # (mapping was persisted above when possible so GUI can enable Citron→Ryujinx syncs).
+            non_empty_slots = [s for s in existing_slots if any(f.is_file() for f in s.rglob("*"))]
+            if not non_empty_slots:
+                continue
+
+            # If multiple non-empty slots exist, pick the most-recently modified one
+            def _slot_latest_mtime(s: Path) -> float:
+                try:
+                    return max((f.stat().st_mtime for f in s.rglob("*") if f.is_file()), default=0.0)
+                except Exception:
+                    return 0.0
+
+            save_dir = max(non_empty_slots, key=_slot_latest_mtime)
+
+            # If game_info wasn't found earlier (unknown titleID), represent it as Unknown for the SaveEntry
+            if not game_info:
+                game_info = GameInfo(title_id=title_id, name="_Unknown (Not found in titleID json files)")
+
+            file_hash = self._hash_directory(save_dir)
+            last_modified = self._latest_mod_time(save_dir)
+
+            save_entries.append(SaveEntry(
+                title_id=title_id,
+                game_name=game_info.name,
+                source="ryujinx",
+                folder_id=folder.name,
+                path=save_dir,
+                modified_time=last_modified,
+                hash=file_hash
+            ))
 
         return save_entries
 

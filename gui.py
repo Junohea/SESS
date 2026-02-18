@@ -285,7 +285,12 @@ class SaveSyncApp:
             print(f"DEBUG: syncing from Citron to Ryujinx for {title_id}")
             fid = self.folder_map.get_ryujinx_folder_id(title_id)
             if fid:
-                dest = self.config.ryujinx_base / 'portable/bis/user/save' / fid / '0'
+                # Prefer the slot we discovered during scanning (preserve '0' vs '1' if present)
+                existing_ryu = self.all_saves.get(title_id, {}).get('ryujinx')
+                if existing_ryu:
+                    dest = existing_ryu.path
+                else:
+                    dest = self.config.ryujinx_base / 'portable/bis/user/save' / fid / '0'
                 self.engine.sync(c, SaveEntry(title_id, c.game_name, 'ryujinx', fid, dest, c.modified_time, ''))
         # Refresh once after performing the selected sync
         self.refresh_data()
@@ -308,7 +313,11 @@ class SaveSyncApp:
             elif c:
                 fid = self.folder_map.get_ryujinx_folder_id(tid)
                 if fid:
-                    dest = self.config.ryujinx_base / 'portable/bis/user/save' / fid / '0'
+                    existing_ryu = self.all_saves.get(tid, {}).get('ryujinx')
+                    if existing_ryu:
+                        dest = existing_ryu.path
+                    else:
+                        dest = self.config.ryujinx_base / 'portable/bis/user/save' / fid / '0'
                     self.engine.sync(c, SaveEntry(tid, c.game_name, 'ryujinx', fid, dest, c.modified_time, ''))
         self.refresh_data()
 
