@@ -108,6 +108,13 @@ class SaveSyncApp:
         scroll = ttk.Scrollbar(self.root, orient='vertical', command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         scroll.pack(side='right', fill='y')
+        # Listen for scrollbar activity so action widgets can be repositioned
+        self.vscroll = scroll
+        try:
+            self.vscroll.bind('<ButtonRelease-1>', lambda e: self._reposition_action_widgets())
+            self.vscroll.bind('<B1-Motion>', lambda e: self._reposition_action_widgets())
+        except Exception:
+            pass
 
         # Bindings
         self.tree.bind('<Double-1>', self.sync_selected)
@@ -116,12 +123,16 @@ class SaveSyncApp:
         # Use ButtonRelease so Treeview's internal handlers don't steal focus from the combobox
         self.tree.bind('<ButtonRelease-1>', self.on_tree_click, add='+')
 
-        # Inline action picker (hidden until needed)
+        # Inline action picker values (we create a persistent Combobox per row)
         self._action_choices = ["No action", "Copy Ryujinx → Citron", "Copy Citron → Ryujinx"]
-        # Parent the combobox to the root so it reliably overlays the Treeview (avoids clipping/scroll issues)
-        self.action_combobox = ttk.Combobox(self.root, values=self._action_choices, state='readonly', width=28)
-        self.action_combobox.bind('<<ComboboxSelected>>', self.on_action_selected)
-        # Do not auto-hide on FocusOut (combobox dropdown triggers FocusOut); hide explicitly after selection.
+        # Map of TitleID -> Combobox widget (persistently shown for each visible row)
+        self._action_widgets = {}
+        # Reposition widgets on tree resize/scroll
+        self.tree.bind('<Configure>', lambda e: self._reposition_action_widgets())
+        self.tree.bind('<Expose>', lambda e: self._reposition_action_widgets())
+        self.tree.bind('<Motion>', lambda e: self._reposition_action_widgets())
+        self.tree.bind('<MouseWheel>', lambda e: self._reposition_action_widgets())
+
 
         # Buttons
         btn_frame = ttk.Frame(self.root)
@@ -225,55 +236,49 @@ class SaveSyncApp:
 
     # --- Inline Action dropdown handlers ---
     def on_tree_click(self, event):
-        # Show inline action combobox when the Action column is clicked
-        # (use ButtonRelease so Treeview's own handlers don't steal focus)
+        # If the Action column was clicked, focus (and open) the per-row combobox for that row
         row_id = self.tree.identify_row(event.y)
         col = self.tree.identify_column(event.x)
         action_col = f"#{self.columns.index('Action') + 1}"
         if col != action_col or not row_id:
             return
-        vals = self.tree.item(row_id, 'values')
-        if not vals:
+        vals = self.tree.item(row_id, 'values') or []
+        if len(vals) < 2:
             return
         tid = vals[1]
-        bbox = self.tree.bbox(row_id, action_col)
-        if not bbox:
+        cb = self._action_widgets.get(tid)
+        if not cb:
             return
-        current = self.user_actions.get(tid, 'none')
-        if current == 'none':
-            sel = 'No action'
-        elif current == 'ryu_to_ci':
-            sel = 'Copy Ryujinx → Citron'
-        else:
-            sel = 'Copy Citron → Ryujinx'
-        self.action_combobox.set(sel)
-        x, y, w, h = bbox
-        # Calculate placement relative to root (Treeview.bbox is relative to the Treeview widget)
         try:
-            tree_root_x = self.tree.winfo_rootx() - self.root.winfo_rootx()
-            tree_root_y = self.tree.winfo_rooty() - self.root.winfo_rooty()
-            place_x = tree_root_x + x
-            place_y = tree_root_y + y
-        except Exception:
-            place_x, place_y = x, y
-        # Place combobox and defer focus so Treeview doesn't immediately reclaim it
-        self.action_combobox.place(x=place_x, y=place_y, width=w, height=h)
-        try:
-            self.action_combobox.lift()
-            self._action_after_id = self.root.after_idle(lambda: self.action_combobox.focus_set())
+            cb.focus_set()
+            cb.event_generate('<Down>')
         except Exception:
             pass
-        # Keep references for selection handler
-        self._action_row_id = row_id
-        self._action_row_tid = tid
-        print(f"DEBUG: showing action combobox for {tid} at {bbox} (placed at {place_x},{place_y})")
 
-    def on_action_selected(self, _event):
-        row_id = getattr(self, '_action_row_id', None)
-        if not row_id:
-            print("DEBUG: on_action_selected called but no row stored")
+
+    def _create_action_widget_for_row(self, iid: str, tid: str):
+        # Create a persistent Combobox widget for the given TitleID (if missing).
+        if tid in self._action_widgets:
+            return self._action_widgets[tid]
+        cb = ttk.Combobox(self.root, values=self._action_choices, state='readonly', width=28)
+        # Initialize selection from user_actions
+        sel = self.user_actions.get(tid, 'none')
+        if sel == 'none':
+            cb.set('No action')
+        elif sel == 'ryu_to_ci':
+            cb.set('Copy Ryujinx → Citron')
+        else:
+            cb.set('Copy Citron → Ryujinx')
+        # Bind selection to per-row handler
+        cb.bind('<<ComboboxSelected>>', lambda e, t=tid, i=iid: self._on_action_widget_selected(t, i))
+        self._action_widgets[tid] = cb
+        return cb
+
+    def _on_action_widget_selected(self, tid: str, iid: str):
+        cb = self._action_widgets.get(tid)
+        if not cb:
             return
-        sel = self.action_combobox.get()
+        sel = cb.get()
         if sel == 'No action':
             action = 'none'
             display = ''
@@ -283,40 +288,57 @@ class SaveSyncApp:
         else:
             action = 'ci_to_ryu'
             display = '←'
-        # Use the TitleID from the current row to avoid mismatches
-        vals = self.tree.item(row_id, 'values') or []
-        tid = vals[1] if len(vals) > 1 else self._action_row_tid
         self.user_actions[tid] = action
         try:
-            self.tree.set(row_id, 'Action', display)
-        except Exception as e:
-            print(f"DEBUG: failed to set tree Action cell: {e}")
+            self.tree.set(iid, 'Action', display)
+        except Exception:
+            pass
         print(f"DEBUG: user_actions[{tid}] = {action}")
-        self.hide_action_combobox()
 
-    def hide_action_combobox(self):
-        try:
-            if hasattr(self, '_action_after_id') and self._action_after_id:
+    def _destroy_action_widgets(self):
+        for cb in list(self._action_widgets.values()):
+            try:
+                cb.destroy()
+            except Exception:
+                pass
+        self._action_widgets.clear()
+
+    def _reposition_action_widgets(self, _event=None):
+        """Place each per-row combobox over its Action cell (hide if row not visible)."""
+        action_col = f"#{self.columns.index('Action') + 1}"
+        for iid in self.tree.get_children():
+            vals = self.tree.item(iid, 'values') or []
+            if len(vals) < 2:
+                continue
+            tid = vals[1]
+            cb = self._action_widgets.get(tid) or self._create_action_widget_for_row(iid, tid)
+            bbox = self.tree.bbox(iid, action_col)
+            if not bbox:
                 try:
-                    self.root.after_cancel(self._action_after_id)
+                    cb.place_forget()
                 except Exception:
                     pass
-                self._action_after_id = None
-        except Exception:
-            pass
-        try:
-            self.action_combobox.place_forget()
-        except Exception:
-            pass
-        self._action_row_id = None
-        self._action_row_tid = None
+                continue
+            x, y, w, h = bbox
+            try:
+                tree_root_x = self.tree.winfo_rootx() - self.root.winfo_rootx()
+                tree_root_y = self.tree.winfo_rooty() - self.root.winfo_rooty()
+                place_x = tree_root_x + x
+                place_y = tree_root_y + y
+            except Exception:
+                place_x, place_y = x, y
+            try:
+                cb.place(x=place_x, y=place_y, width=w, height=h)
+                cb.lift()
+            except Exception:
+                pass
 
     def refresh_data(self):
         # Validate
         if not self.ryujinx_base.get() or not self.citron_base.get():
             return
-        # Ensure any inline picker is hidden while we refresh
-        self.hide_action_combobox()
+        # Destroy and later recreate persistent per-row action widgets while we refresh
+        self._destroy_action_widgets()
         # Clear
         for iid in self.tree.get_children():
             self.tree.delete(iid)
@@ -463,7 +485,10 @@ class SaveSyncApp:
                 tags.append('needs_init')
             if row[5]:
                 tags.append('syncable')
-            self.tree.insert('', 'end', values=row, tags=tags)
+            iid = self.tree.insert('', 'end', values=row, tags=tags)
+
+        # Create / position persistent action comboboxes for visible rows
+        self._reposition_action_widgets()
 
     def sync_selected(self, event):
         # Debug: confirm method entry
