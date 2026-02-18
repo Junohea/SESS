@@ -42,41 +42,84 @@ class SaveScanner:
             if game_info:
                 self.folder_map.register_ryujinx_folder(folder.name, title_id)
 
-            # Ryujinx may store per-user slots under numeric names (commonly '0' and '1').
-            # Prefer slot '0' but accept '1' (or the most-recent non-empty slot) if '0' is missing/empty.
-            candidate_slots = [folder / "0", folder / "1"]
-            existing_slots = [s for s in candidate_slots if s.exists() and s.is_dir()]
+            # Ryujinx may store per-user slots under numeric names (0, 1, 2...).
+            # Detect any numeric slot directory and prefer the most-recent non-empty slot.
+            existing_slots = [s for s in folder.iterdir() if s.is_dir() and s.name.isdigit()]
 
-            # If there are no existing slot directories or all are empty, do not create a SaveEntry
-            # (mapping was persisted above when possible so GUI can enable Citron→Ryujinx syncs).
+            # Consider numeric slot directories and collect per-slot diagnostics
             non_empty_slots = [s for s in existing_slots if any(f.is_file() for f in s.rglob("*"))]
             if not non_empty_slots:
                 continue
 
-            # If multiple non-empty slots exist, pick the most-recently modified one
             def _slot_latest_mtime(s: Path) -> float:
                 try:
                     return max((f.stat().st_mtime for f in s.rglob("*") if f.is_file()), default=0.0)
                 except Exception:
                     return 0.0
 
-            save_dir = max(non_empty_slots, key=_slot_latest_mtime)
+            # Choose the primary slot (most-recent non-empty) for the SaveEntry.path/hash
+            primary_slot = max(non_empty_slots, key=_slot_latest_mtime)
+
+            # Gather per-slot metrics and also aggregate totals for the Ryujinx SaveEntry
+            slots_info = {}
+            aggregated_file_count = 0
+            aggregated_max_size = 0
+            aggregated_latest = 0.0
+
+            for s in non_empty_slots:
+                slot_hash = self._hash_directory(s)
+                slot_mtime = self._latest_mod_time(s)
+                slot_file_count = 0
+                slot_max_size = 0
+                for f in s.rglob("*"):
+                    if not f.is_file():
+                        continue
+                    if f.name in ("ExtraData0", "ExtraData1"):
+                        continue
+                    slot_file_count += 1
+                    try:
+                        sz = f.stat().st_size
+                    except Exception:
+                        sz = 0
+                    if sz > slot_max_size:
+                        slot_max_size = sz
+                slots_info[s.name] = {
+                    'hash': slot_hash,
+                    'modified_time': slot_mtime,
+                    'file_count': slot_file_count,
+                    'max_file_size': slot_max_size,
+                    'path': s,
+                }
+                aggregated_file_count += slot_file_count
+                if slot_max_size > aggregated_max_size:
+                    aggregated_max_size = slot_max_size
+                mt = 0.0
+                try:
+                    mt = max((f.stat().st_mtime for f in s.rglob('*') if f.is_file()), default=0.0)
+                except Exception:
+                    mt = 0.0
+                if mt > aggregated_latest:
+                    aggregated_latest = mt
 
             # If game_info wasn't found earlier (unknown titleID), represent it as Unknown for the SaveEntry
             if not game_info:
                 game_info = GameInfo(title_id=title_id, name="_Unknown (Not found in titleID json files)")
 
-            file_hash = self._hash_directory(save_dir)
-            last_modified = self._latest_mod_time(save_dir)
+            # Primary slot determines the canonical hash/path for backward-compatible behavior
+            primary_hash = slots_info[primary_slot.name]['hash']
+            last_modified = datetime.fromtimestamp(aggregated_latest) if aggregated_latest else self._latest_mod_time(primary_slot)
 
             save_entries.append(SaveEntry(
                 title_id=title_id,
                 game_name=game_info.name,
                 source="ryujinx",
                 folder_id=folder.name,
-                path=save_dir,
+                path=primary_slot,
                 modified_time=last_modified,
-                hash=file_hash
+                hash=primary_hash,
+                file_count=aggregated_file_count,
+                max_file_size=aggregated_max_size,
+                slots=slots_info
             ))
 
         return save_entries
@@ -151,7 +194,24 @@ class SaveScanner:
 
             game_info = self.nswdb.get_game_info(title_id) or GameInfo(title_id=title_id, name="Unknown")
             file_hash = self._hash_directory(folder)
-            last_modified = self._latest_mod_time(folder)
+            # Exclude ExtraData0/ExtraData1 when computing the 'last modified' time for Citron saves
+            last_modified = self._latest_mod_time(folder, exclude_names={"ExtraData0", "ExtraData1"})
+
+            # Compute file-count and largest-file (exclude ExtraData0/ExtraData1)
+            file_count = 0
+            max_size = 0
+            for f in folder.rglob("*"):
+                if not f.is_file():
+                    continue
+                if f.name in ("ExtraData0", "ExtraData1"):
+                    continue
+                file_count += 1
+                try:
+                    sz = f.stat().st_size
+                except Exception:
+                    sz = 0
+                if sz > max_size:
+                    max_size = sz
 
             save_entries.append(SaveEntry(
                 title_id=title_id,
@@ -160,7 +220,9 @@ class SaveScanner:
                 folder_id=user_id,
                 path=folder,
                 modified_time=last_modified,
-                hash=file_hash
+                hash=file_hash,
+                file_count=file_count,
+                max_file_size=max_size
             ))
 
         return save_entries
@@ -206,9 +268,16 @@ class SaveScanner:
                     md5.update(file.name.encode())
         return md5.hexdigest()
 
-    def _latest_mod_time(self, directory: Path) -> datetime:
+    def _latest_mod_time(self, directory: Path, exclude_names: Optional[set] = None) -> datetime:
+        """Return the latest modification time for files under `directory`.
+
+        If `exclude_names` is provided, files whose name matches any entry in the set
+        are ignored (useful to exclude ExtraData0/ExtraData1 metadata files).
+        """
+        if exclude_names is None:
+            exclude_names = set()
         latest = max(
-            (f.stat().st_mtime for f in directory.rglob("*") if f.is_file()),
+            (f.stat().st_mtime for f in directory.rglob("*") if f.is_file() and f.name not in exclude_names),
             default=0.0
         )
         # If no files found, default returns 0.0; convert to datetime

@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox
 from models import Config, SaveEntry
 from nswdb_parser import NSWDBParser
 from save_scanner import SaveScanner
@@ -36,6 +36,8 @@ class SaveSyncApp:
         self.engine = None
         self.all_saves = defaultdict(dict)
         self.citron_user_id = None
+        # Per-title user-selected action: 'none' | 'ryu_to_ci' | 'ci_to_ryu'
+        self.user_actions = {}
 
         # Set GUI prompt handler
         import foldermap
@@ -110,6 +112,16 @@ class SaveSyncApp:
         # Bindings
         self.tree.bind('<Double-1>', self.sync_selected)
         self.tree.bind('<Button-3>', self.show_context_menu)
+        # Clicking the Action column will show an inline dropdown
+        # Use ButtonRelease so Treeview's internal handlers don't steal focus from the combobox
+        self.tree.bind('<ButtonRelease-1>', self.on_tree_click, add='+')
+
+        # Inline action picker (hidden until needed)
+        self._action_choices = ["No action", "Copy Ryujinx → Citron", "Copy Citron → Ryujinx"]
+        # Parent the combobox to the root so it reliably overlays the Treeview (avoids clipping/scroll issues)
+        self.action_combobox = ttk.Combobox(self.root, values=self._action_choices, state='readonly', width=28)
+        self.action_combobox.bind('<<ComboboxSelected>>', self.on_action_selected)
+        # Do not auto-hide on FocusOut (combobox dropdown triggers FocusOut); hide explicitly after selection.
 
         # Buttons
         btn_frame = ttk.Frame(self.root)
@@ -163,10 +175,148 @@ class SaveSyncApp:
             return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")
         return '-'
 
+    def format_bytes(self, n: int) -> str:
+        # Human-readable file size
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if n < 1024.0:
+                return f"{n:.1f}{unit}" if unit != 'B' else f"{n}B"
+            n /= 1024.0
+        return f"{n:.1f}TB"
+
+    def _files_equal(self, a: 'Path', b: 'Path') -> bool:
+        try:
+            if a.stat().st_size != b.stat().st_size:
+                return False
+            # fast path: compare first/last bytes for very large files could be added, but use md5
+            import hashlib
+            ha = hashlib.md5()
+            hb = hashlib.md5()
+            with a.open('rb') as fa, b.open('rb') as fb:
+                while True:
+                    ca = fa.read(8192)
+                    cb = fb.read(8192)
+                    if not ca and not cb:
+                        break
+                    ha.update(ca)
+                    hb.update(cb)
+            return ha.digest() == hb.digest()
+        except Exception:
+            return False
+
+    def _slot_contains_citron_files(self, slot_path: 'Path', citron_path: 'Path') -> bool:
+        # Return True if every (non-ExtraData) file present in citron_path exists in slot_path
+        try:
+            for f in citron_path.rglob('*'):
+                if not f.is_file():
+                    continue
+                if f.name in ("ExtraData0", "ExtraData1"):
+                    continue
+                rel = f.relative_to(citron_path)
+                candidate = slot_path / rel
+                if not candidate.exists() or not candidate.is_file():
+                    return False
+                if candidate.stat().st_size != f.stat().st_size:
+                    return False
+                if not self._files_equal(f, candidate):
+                    return False
+            return True
+        except Exception:
+            return False
+
+    # --- Inline Action dropdown handlers ---
+    def on_tree_click(self, event):
+        # Show inline action combobox when the Action column is clicked
+        # (use ButtonRelease so Treeview's own handlers don't steal focus)
+        row_id = self.tree.identify_row(event.y)
+        col = self.tree.identify_column(event.x)
+        action_col = f"#{self.columns.index('Action') + 1}"
+        if col != action_col or not row_id:
+            return
+        vals = self.tree.item(row_id, 'values')
+        if not vals:
+            return
+        tid = vals[1]
+        bbox = self.tree.bbox(row_id, action_col)
+        if not bbox:
+            return
+        current = self.user_actions.get(tid, 'none')
+        if current == 'none':
+            sel = 'No action'
+        elif current == 'ryu_to_ci':
+            sel = 'Copy Ryujinx → Citron'
+        else:
+            sel = 'Copy Citron → Ryujinx'
+        self.action_combobox.set(sel)
+        x, y, w, h = bbox
+        # Calculate placement relative to root (Treeview.bbox is relative to the Treeview widget)
+        try:
+            tree_root_x = self.tree.winfo_rootx() - self.root.winfo_rootx()
+            tree_root_y = self.tree.winfo_rooty() - self.root.winfo_rooty()
+            place_x = tree_root_x + x
+            place_y = tree_root_y + y
+        except Exception:
+            place_x, place_y = x, y
+        # Place combobox and defer focus so Treeview doesn't immediately reclaim it
+        self.action_combobox.place(x=place_x, y=place_y, width=w, height=h)
+        try:
+            self.action_combobox.lift()
+            self._action_after_id = self.root.after_idle(lambda: self.action_combobox.focus_set())
+        except Exception:
+            pass
+        # Keep references for selection handler
+        self._action_row_id = row_id
+        self._action_row_tid = tid
+        print(f"DEBUG: showing action combobox for {tid} at {bbox} (placed at {place_x},{place_y})")
+
+    def on_action_selected(self, _event):
+        row_id = getattr(self, '_action_row_id', None)
+        if not row_id:
+            print("DEBUG: on_action_selected called but no row stored")
+            return
+        sel = self.action_combobox.get()
+        if sel == 'No action':
+            action = 'none'
+            display = ''
+        elif sel == 'Copy Ryujinx → Citron':
+            action = 'ryu_to_ci'
+            display = '→'
+        else:
+            action = 'ci_to_ryu'
+            display = '←'
+        # Use the TitleID from the current row to avoid mismatches
+        vals = self.tree.item(row_id, 'values') or []
+        tid = vals[1] if len(vals) > 1 else self._action_row_tid
+        self.user_actions[tid] = action
+        try:
+            self.tree.set(row_id, 'Action', display)
+        except Exception as e:
+            print(f"DEBUG: failed to set tree Action cell: {e}")
+        print(f"DEBUG: user_actions[{tid}] = {action}")
+        self.hide_action_combobox()
+
+    def hide_action_combobox(self):
+        try:
+            if hasattr(self, '_action_after_id') and self._action_after_id:
+                try:
+                    self.root.after_cancel(self._action_after_id)
+                except Exception:
+                    pass
+                self._action_after_id = None
+        except Exception:
+            pass
+        try:
+            self.action_combobox.place_forget()
+        except Exception:
+            pass
+        self._action_row_id = None
+        self._action_row_tid = None
+
     def refresh_data(self):
         # Validate
         if not self.ryujinx_base.get() or not self.citron_base.get():
             return
+        # Ensure any inline picker is hidden while we refresh
+        self.hide_action_combobox()
         # Clear
         for iid in self.tree.get_children():
             self.tree.delete(iid)
@@ -210,19 +360,75 @@ class SaveSyncApp:
             c = sources.get('citron')
             rd = self.format_time(r.modified_time) if r else '-'
             cd = self.format_time(c.modified_time) if c else '-'
+
+            # Determine status (preserve the existing "newer" indicators but augment
+            # them with file-count and largest-file information). Treat a MATCH if
+            # any Ryujinx slot contains the Citron files.
+            st = ''
             if r and c:
+                # Exact match against the canonical (primary) Ryujinx slot
                 if r.hash == c.hash:
-                    st, ac = '✅ MATCH', ''
-                elif r.modified_time > c.modified_time:
-                    st, ac = '🔺 Ryujinx newer', '→'
+                    st = '✅ MATCH'
                 else:
-                    st, ac = '🟢 Citron newer', '←'
+                    # Also consider individual Ryujinx slots — if any slot's hash equals Citron, count as MATCH
+                    matched_slot = None
+                    for sname, sinfo in getattr(r, 'slots', {}).items():
+                        if sinfo.get('hash') == c.hash:
+                            matched_slot = sname
+                            break
+
+                    # If no exact slot-hash match, check whether *any* slot contains all files from Citron
+                    subset_slot = None
+                    if not matched_slot:
+                        try:
+                            for sname, sinfo in getattr(r, 'slots', {}).items():
+                                slot_path = sinfo.get('path')
+                                if slot_path and self._slot_contains_citron_files(slot_path, c.path):
+                                    subset_slot = sname
+                                    break
+                        except Exception:
+                            subset_slot = None
+
+                    if matched_slot or subset_slot:
+                        slot_used = matched_slot or subset_slot
+                        st = f"✅ MATCH (Ryujinx slot {slot_used})"
+                    else:
+                        # base newer indicator (informational only)
+                        if r.modified_time > c.modified_time:
+                            base = '🔺 Ryujinx newer'
+                        elif c.modified_time > r.modified_time:
+                            base = '🟢 Citron newer'
+                        else:
+                            base = '🔁 Unsynced'
+
+                        # file-count comparison (Ryujinx uses aggregated slot counts)
+                        fc_note = None
+                        if getattr(r, 'file_count', 0) != getattr(c, 'file_count', 0):
+                            fc_winner = 'Ryujinx' if r.file_count > c.file_count else 'Citron'
+                            fc_note = f"more files: {fc_winner} ({max(r.file_count, c.file_count)} vs {min(r.file_count, c.file_count)})"
+
+                        # largest-file comparison
+                        lf_note = None
+                        if getattr(r, 'max_file_size', 0) != getattr(c, 'max_file_size', 0):
+                            lf_winner = 'Ryujinx' if r.max_file_size > c.max_file_size else 'Citron'
+                            lf_note = f"largest file: {lf_winner} ({self.format_bytes(max(r.max_file_size, c.max_file_size))} vs {self.format_bytes(min(r.max_file_size, c.max_file_size))})"
+
+                        notes = ' • '.join(n for n in (fc_note, lf_note) if n)
+                        st = f"{base}{(' • ' + notes) if notes else ''}"
             elif r:
-                st, ac = '🟥 Only in Ryujinx', '→'
+                st = '🟥 Only in Ryujinx'
             else:
-                # If we have a Ryujinx folder mapping for this TitleID, it's "Only in Citron" and syncable.
                 st = '🟥 Only in Citron' if self.folder_map.get_ryujinx_folder_id(tid) else '🚫 Run in Ryujinx'
-                ac = '←' if c and self.folder_map.get_ryujinx_folder_id(tid) else ''
+
+            # Action: use user-selected action (default 'none' -> display empty)
+            action = self.user_actions.get(tid, 'none')
+            if action == 'ryu_to_ci':
+                ac = '→'
+            elif action == 'ci_to_ryu':
+                ac = '←'
+            else:
+                ac = ''
+
             rows.append((name, tid, st, rd, cd, ac))
 
         # Sort & filter
@@ -274,51 +480,86 @@ class SaveSyncApp:
         c = self.all_saves[title_id].get('citron')
         action = vals[5]
         print(f"DEBUG: action: {action}, r: {bool(r)}, c: {bool(c)}")
-        if action == '→' and r:
-            print(f"DEBUG: syncing from Ryujinx to Citron for {title_id}")
-            citron_base_used = getattr(self.folder_map, 'cached_citron_base', None)
-            if citron_base_used is None:
-                citron_base_used = self.config.citron_base / 'user/nand/user/save/0000000000000000'
-            dest = citron_base_used / self.citron_user_id / title_id
-            self.engine.sync(r, SaveEntry(title_id, r.game_name, 'citron', self.citron_user_id, dest, r.modified_time, ''))
-        elif action == '←' and c:
-            print(f"DEBUG: syncing from Citron to Ryujinx for {title_id}")
-            fid = self.folder_map.get_ryujinx_folder_id(title_id)
-            if fid:
-                # Prefer the slot we discovered during scanning (preserve '0' vs '1' if present)
-                existing_ryu = self.all_saves.get(title_id, {}).get('ryujinx')
-                if existing_ryu:
-                    dest = existing_ryu.path
+        # Use the user-selected action (default is 'none' — do nothing)
+        selected_action = self.user_actions.get(title_id, 'none')
+        if selected_action == 'ryu_to_ci':
+            if not r:
+                messagebox.showwarning("Cannot sync", "No Ryujinx save present to copy from.")
+            else:
+                print(f"DEBUG: syncing from Ryujinx to Citron for {title_id}")
+                citron_base_used = getattr(self.folder_map, 'cached_citron_base', None)
+                if citron_base_used is None:
+                    citron_base_used = self.config.citron_base / 'user/nand/user/save/0000000000000000'
+                dest = citron_base_used / self.citron_user_id / title_id
+                self.engine.sync(r, SaveEntry(title_id, r.game_name, 'citron', self.citron_user_id, dest, r.modified_time, ''))
+        elif selected_action == 'ci_to_ryu':
+            if not c:
+                messagebox.showwarning("Cannot sync", "No Citron save present to copy from.")
+            else:
+                fid = self.folder_map.get_ryujinx_folder_id(title_id)
+                if not fid:
+                    messagebox.showwarning("Cannot sync", "No Ryujinx folder mapping exists for this TitleID.")
                 else:
-                    dest = self.config.ryujinx_base / 'portable/bis/user/save' / fid / '0'
-                self.engine.sync(c, SaveEntry(title_id, c.game_name, 'ryujinx', fid, dest, c.modified_time, ''))
+                    print(f"DEBUG: syncing from Citron to Ryujinx for {title_id}")
+                    existing_ryu = self.all_saves.get(title_id, {}).get('ryujinx')
+                    if existing_ryu:
+                        dest = existing_ryu.path
+                    else:
+                        dest = self.config.ryujinx_base / 'portable/bis/user/save' / fid / '0'
+                    self.engine.sync(c, SaveEntry(title_id, c.game_name, 'ryujinx', fid, dest, c.modified_time, ''))
+        else:
+            messagebox.showinfo("No action selected", "Choose an action from the Action column before syncing.")
+
         # Refresh once after performing the selected sync
         self.refresh_data()
 
     def sync_all(self):
+        # Only perform syncs for titles where the user has explicitly selected an action.
+        performed = 0
         for tid, sources in self.all_saves.items():
+            action = self.user_actions.get(tid, 'none')
             r = sources.get('ryujinx')
             c = sources.get('citron')
-            if r and c and r.hash != c.hash:
-                if r.modified_time > c.modified_time:
-                    self.engine.sync(r, c)
-                else:
-                    self.engine.sync(c, r)
-            elif r:
+            if action == 'ryu_to_ci':
+                if not r:
+                    continue
                 citron_base_used = getattr(self.folder_map, 'cached_citron_base', None)
                 if citron_base_used is None:
                     citron_base_used = self.config.citron_base / 'user/nand/user/save/0000000000000000'
                 dest = citron_base_used / self.citron_user_id / tid
                 self.engine.sync(r, SaveEntry(tid, r.game_name, 'citron', self.citron_user_id, dest, r.modified_time, ''))
-            elif c:
+                performed += 1
+            elif action == 'ci_to_ryu':
+                if not c:
+                    continue
                 fid = self.folder_map.get_ryujinx_folder_id(tid)
-                if fid:
-                    existing_ryu = self.all_saves.get(tid, {}).get('ryujinx')
-                    if existing_ryu:
-                        dest = existing_ryu.path
+                if not fid:
+                    continue
+                existing_ryu = self.all_saves.get(tid, {}).get('ryujinx')
+                if existing_ryu:
+                    dest = existing_ryu.path
+                else:
+                    # Detect preferred slot under the Ryujinx folder (prefer non-empty slots)
+                    ryu_folder = self.config.ryujinx_base / 'portable/bis/user/save' / fid
+                    chosen_slot = None
+                    try:
+                        candidates = [p for p in ryu_folder.iterdir() if p.is_dir() and p.name.isdigit()]
+                        non_empty = [s for s in candidates if any(f.is_file() for f in s.rglob('*'))]
+                        if non_empty:
+                            chosen_slot = max(non_empty, key=lambda s: max((f.stat().st_mtime for f in s.rglob('*') if f.is_file()), default=0.0))
+                        elif candidates:
+                            candidates.sort(key=lambda p: int(p.name) if p.name.isdigit() else 0)
+                            chosen_slot = candidates[0]
+                    except Exception:
+                        chosen_slot = None
+                    if chosen_slot:
+                        dest = chosen_slot
                     else:
-                        dest = self.config.ryujinx_base / 'portable/bis/user/save' / fid / '0'
-                    self.engine.sync(c, SaveEntry(tid, c.game_name, 'ryujinx', fid, dest, c.modified_time, ''))
+                        dest = ryu_folder / '0'
+                self.engine.sync(c, SaveEntry(tid, c.game_name, 'ryujinx', fid, dest, c.modified_time, ''))
+                performed += 1
+        if performed == 0:
+            messagebox.showinfo("No actions", "No sync actions selected. Use the Action dropdown to choose which save to keep.")
         self.refresh_data()
 
     def prompt_for_folder_choice(self, options):

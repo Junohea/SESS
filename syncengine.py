@@ -19,10 +19,43 @@ class SyncEngine:
     def sync(self, source: SaveEntry, destination: SaveEntry):
         """
         Sync source save to destination.
+
+        Special behavior:
+        - When copying from Citron -> Ryujinx we exclude ExtraData0/ExtraData1 files.
+        - When the destination is a Ryujinx slot folder we back up and copy into *all* numeric
+          sibling slots under the same Ryujinx folder (so both '0' and '1' are updated).
         """
         print(f"[SYNC] {source.game_name}: {source.source} → {destination.source}")
+
+        exclude_extra = (source.source == 'citron' and destination.source == 'ryujinx')
+
+        # If destination is a Ryujinx per-slot path ( .../save/<fid>/<slot> ), copy into all
+        # numeric sibling slots we find under the same <fid> directory.
+        try:
+            if destination.source == 'ryujinx' and destination.path.name.isdigit():
+                slot_parent = destination.path.parent
+                slot_dirs = [p for p in slot_parent.iterdir() if p.is_dir() and p.name.isdigit()]
+                # If no numeric siblings found, fall back to the single destination path
+                if not slot_dirs:
+                    slot_dirs = [destination.path]
+
+                # Back up each existing slot before replacing
+                for sd in slot_dirs:
+                    sd_entry = SaveEntry(destination.title_id, destination.game_name, destination.source,
+                                         destination.folder_id, sd, destination.modified_time, destination.hash)
+                    self._backup(sd_entry)
+
+                # Copy source into each discovered slot
+                for sd in slot_dirs:
+                    self._copy_save(source.path, sd, exclude_extra)
+                return
+        except Exception:
+            # Fall back to single-slot behavior on unexpected errors
+            pass
+
+        # Default single-destination behavior
         self._backup(destination)
-        self._copy_save(source.path, destination.path)
+        self._copy_save(source.path, destination.path, exclude_extra)
 
     def _backup(self, save: SaveEntry):
         # Don't attempt to back up a destination that doesn't yet exist or is empty
@@ -74,7 +107,7 @@ class SyncEngine:
                 continue
         return False
 
-    def _copy_save(self, src: Path, dst: Path):
+    def _copy_save(self, src: Path, dst: Path, exclude_extra: bool = False):
         # Basic validation
         if not src.exists() or not src.is_dir():
             raise FileNotFoundError(f"Source save folder does not exist: {src}")
@@ -88,8 +121,17 @@ class SyncEngine:
         # Ensure clean temp
         if tmp.exists():
             shutil.rmtree(tmp)
-        # Copy to temporary location first
-        shutil.copytree(src, tmp)
+
+        # Prepare ignore rule when we must not copy ExtraData files
+        ignore = None
+        if exclude_extra:
+            ignore = shutil.ignore_patterns("ExtraData0", "ExtraData1")
+
+        # Copy to temporary location first (apply ignore if requested)
+        if ignore:
+            shutil.copytree(src, tmp, ignore=ignore)
+        else:
+            shutil.copytree(src, tmp)
 
         # Move existing dst aside (if present)
         if dst.exists():
