@@ -114,7 +114,17 @@ class FolderMap:
             base = None
 
         if base is None:
-            base = citron_base / "user/nand/user/save/0000000000000000"
+            # Try multiple layout variants — Citron uses user/nand/..., Yuzu Flatpak uses nand/...
+            for _candidate in [
+                citron_base / "user/nand/user/save/0000000000000000",  # Citron standard
+                citron_base / "nand/user/save/0000000000000000",        # Yuzu Flatpak
+                citron_base / "user/save/0000000000000000",             # alternate layout
+            ]:
+                if _candidate.exists() and _candidate.is_dir():
+                    base = _candidate
+                    break
+            if base is None:
+                base = citron_base / "user/nand/user/save/0000000000000000"
 
         # Cache the discovered base for use by callers
         try:

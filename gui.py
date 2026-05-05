@@ -369,8 +369,6 @@ class SaveSyncApp:
                 self.config.citron_base,
                 set(self.nswdb.game_lookup.keys())
             )
-            if not self.citron_user_id:
-                return
         self.scanner = SaveScanner(self.config, self.nswdb)
         self.scanner.folder_map = self.folder_map
         self.engine = SyncEngine(self.config)
