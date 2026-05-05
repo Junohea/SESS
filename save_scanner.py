@@ -129,6 +129,7 @@ class SaveScanner:
         base = self.config.ryujinx_base
         candidates = [
             base / "portable/bis/user/save",
+            base / "bis/user/save",        # non-portable Flatpak / native Linux layout
             base / "user/save",
             base / "save",
             base / "portable/user/save",

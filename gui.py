@@ -5,6 +5,7 @@ from nswdb_parser import NSWDBParser
 from save_scanner import SaveScanner
 from syncengine import SyncEngine
 from foldermap import FolderMap
+from platform_defaults import detect_linux_defaults
 
 from pathlib import Path
 from collections import defaultdict
@@ -64,6 +65,15 @@ class SaveSyncApp:
                 self.show_only_unsynced.set(data.get("show_only_unsynced", False))
             except:
                 pass
+
+        # On Linux (SteamDeck / SteamOS), auto-fill any empty path fields from
+        # well-known Flatpak / native install locations. Never overwrites a set path.
+        if platform.system() == "Linux":
+            ryu_detected, citron_detected = detect_linux_defaults()
+            if not self.ryujinx_base.get() and ryu_detected:
+                self.ryujinx_base.set(str(ryu_detected))
+            if not self.citron_base.get() and citron_detected:
+                self.citron_base.set(str(citron_detected))
 
     def save_last_config(self):
         data = {
