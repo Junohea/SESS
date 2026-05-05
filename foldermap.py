@@ -123,6 +123,10 @@ class FolderMap:
             self.cached_citron_base = None
         candidates = []
 
+        if not base.exists():
+            print("❌ No valid Citron user folder found with known titleIDs.")
+            return None
+
         for folder in base.iterdir():
             if folder.is_dir():
                 for subfolder in folder.iterdir():
