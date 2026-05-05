@@ -597,9 +597,37 @@ class SaveSyncApp:
         dlg.transient(self.root)
         dlg.grab_set()
         ttk.Label(dlg, text="Multiple save folders found. Select one:").pack(pady=10)
+
+        # Determine base path for the listed folders (FolderMap caches it earlier)
+        base = None
+        try:
+            base = getattr(self.folder_map, 'cached_citron_base', None)
+        except Exception:
+            base = None
+        if base is None:
+            # Fallback to the expected Citron save base
+            base = self.config.citron_base / "user/nand/user/save/0000000000000000"
+
         var = tk.StringVar(value=options[0])
         for opt in options:
-            ttk.Radiobutton(dlg, text=opt, variable=var, value=opt).pack(anchor='w', padx=20)
+            row = ttk.Frame(dlg)
+            row.pack(fill='x', padx=20, pady=2)
+            rb = ttk.Radiobutton(row, text=opt, variable=var, value=opt)
+            rb.pack(side='left', anchor='w', expand=True, fill='x')
+
+            def _open(o=opt, b=base):
+                try:
+                    p = Path(b) / o
+                    if not p.exists():
+                        messagebox.showwarning("Folder not found", f"Folder does not exist: {p}")
+                        return
+                    self.open_path(p)
+                except Exception as e:
+                    messagebox.showwarning("Cannot open folder", f"Unable to open {p}:\n{e}")
+
+            btn = ttk.Button(row, text="Open", command=_open)
+            btn.pack(side='right')
+
         ttk.Button(dlg, text="OK", command=dlg.destroy).pack(pady=10)
         self.root.wait_window(dlg)
         return var.get()
