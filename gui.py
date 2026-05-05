@@ -147,6 +147,7 @@ class SaveSyncApp:
         # Buttons
         btn_frame = ttk.Frame(self.root)
         btn_frame.pack(fill='x', pady=5)
+        ttk.Button(btn_frame, text="Backup All Saves", command=self.backup_all_saves).pack(side='left', padx=5)
         ttk.Button(btn_frame, text="Sync All", command=self.sync_all).pack(side='left', padx=5)
         ttk.Button(btn_frame, text="Refresh", command=self.refresh_data).pack(side='left')
         ttk.Button(btn_frame, text="Exit", command=self.on_exit).pack(side='right')
@@ -594,6 +595,44 @@ class SaveSyncApp:
         if performed == 0:
             messagebox.showinfo("No actions", "No sync actions selected. Use the Action dropdown to choose which save to keep.")
         self.refresh_data()
+
+    def backup_all_saves(self):
+        if not self.engine or not self.all_saves:
+            self.refresh_data()
+        if not self.engine:
+            messagebox.showwarning("Not ready", "Could not load save data. Check your emulator paths and try again.")
+            return
+
+        backed_up = 0
+        skipped = 0
+        errors = []
+
+        for tid, sources in self.all_saves.items():
+            for key in ('ryujinx', 'citron'):
+                entry = sources.get(key)
+                if entry is None:
+                    continue
+                try:
+                    if not entry.path.exists():
+                        skipped += 1
+                        continue
+                    files = [f for f in entry.path.rglob('*') if f.is_file()]
+                    if not files:
+                        skipped += 1
+                        continue
+                    self.engine._backup(entry)
+                    backed_up += 1
+                except Exception as e:
+                    errors.append(f"{tid} ({key}): {e}")
+
+        msg = f"Backed up {backed_up} save(s)."
+        if skipped:
+            msg += f"\n{skipped} skipped (no files found)."
+        if errors:
+            msg += f"\n\n{len(errors)} error(s):\n" + "\n".join(errors[:10])
+            messagebox.showwarning("Backup All Saves", msg)
+        else:
+            messagebox.showinfo("Backup All Saves", msg)
 
     def prompt_for_folder_choice(self, options):
         if not options:
